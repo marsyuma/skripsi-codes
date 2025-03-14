@@ -55,15 +55,20 @@ void send_snmp_trap(const char *message) {
         return;
     }
 
-    netsnmp_variable_list *var_list = NULL;
-    snmp_varlist_add_variable(&var_list,
-                              oid_str2oid(OID),
-                              OID_LENGTH(oid_str2oid(OID)),
-                              ASN_OCTET_STR,
-                              (u_char *)message, strlen(message));
+    oid anOID[MAX_OID_LEN];
+    size_t anOID_len = MAX_OID_LEN;
+    if (!read_objid(OID, anOID, &anOID_len)) {
+        fprintf(stderr, "Error parsing OID\n");
+        return;
+    }
 
-    send_v2trap(var_list);
-    snmp_free_varbind(var_list);
+    netsnmp_pdu *pdu = snmp_pdu_create(SNMP_MSG_TRAP2);
+    snmp_add_var(pdu, anOID, anOID_len, 's', message);
+    
+    if (snmp_send(ss, pdu) == 0) {
+        snmp_perror("snmp_send");
+    }
+    
     snmp_close(ss);
 }
 

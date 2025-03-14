@@ -1,57 +1,32 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <netdb.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <pcap.h>
+#include <netinet/ip.h>
+#include <netinet/icmp.h>
 #include <net-snmp/net-snmp-config.h>
 #include <net-snmp/net-snmp-includes.h>
 
 #define TRAP_DESTINATION "192.168.0.140"
 #define COMMUNITY "public"
 #define OID ".1.3.6.1.4.1.8072.9999.1" // Custom OID
-#define CHECK_INTERVAL 3 // Time in seconds to check connections
+#define NETWORK_PREFIX "192.168.0."
+#define INTERFACE "eth0" // Change to your network interface
 
-// List of domains to check
-const char *domains[] = {
-    "example.com",
-    "google.com",
-    "yahoo.com"
-};
+volatile sig_atomic_t keep_running = 1;
 
-volatile sig_atomic_t keep_running = 1; // Flag to control loop execution
-
+// Handle Ctrl+C to exit gracefully
 void handle_signal(int sig) {
-    if (sig == SIGINT) {  // Catch Ctrl+C
+    if (sig == SIGINT) {
         printf("\nTerminating program...\n");
         keep_running = 0;
     }
 }
 
-int check_connection(const char *hostname) {
-    struct hostent *host;
-    struct sockaddr_in addr;
-
-    host = gethostbyname(hostname);
-    if (!host) {
-        return 0; // No connection
-    }
-
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(80);
-    addr.sin_addr = *((struct in_addr *)host->h_addr);
-
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        return 0;
-    }
-
-    int connected = connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0;
-    close(sock);
-    return connected;
-}
-
+// Function to send SNMP trap
 void send_snmp_trap(const char *message) {
     struct snmp_session session, *ss;
     snmp_sess_init(&session);
@@ -83,21 +58,53 @@ void send_snmp_trap(const char *message) {
     snmp_close(ss);
 }
 
+// Packet handler for sniffing ICMP requests
+void packet_handler(u_char *user, const struct pcap_pkthdr *pkthdr, const u_char *packet) {
+    struct ip *ip_header = (struct ip *)(packet + 14); // Skip Ethernet header
+    struct icmphdr *icmp_header = (struct icmphdr *)(packet + 14 + (ip_header->ip_hl * 4));
+
+    char src_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(ip_header->ip_src), src_ip, INET_ADDRSTRLEN);
+
+    // Check if it is an ICMP echo request (ping)
+    if (icmp_header->type == ICMP_ECHO) {
+        if (strncmp(src_ip, NETWORK_PREFIX, strlen(NETWORK_PREFIX)) == 0) {
+            printf("Ping detected from %s, sending SNMP trap...\n", src_ip);
+            send_snmp_trap(src_ip);
+        } else if (strcmp(src_ip, "192.168.0.140") == 0) {
+            printf("Ping detected from 192.168.0.140, sending SNMP trap...\n");
+            send_snmp_trap(src_ip);
+        }
+    }
+}
+
 int main() {
     signal(SIGINT, handle_signal); // Handle Ctrl+C
 
-    while (keep_running) {
-        for (int i = 0; i < sizeof(domains) / sizeof(domains[0]); i++) {
-            if (check_connection(domains[i])) {
-                printf("Connection detected to %s, sending SNMP trap...\n", domains[i]);
-                send_snmp_trap(domains[i]);
-            } else {
-                printf("No connection to %s\n", domains[i]);
-            }
-        }
-        sleep(CHECK_INTERVAL); // Wait before the next check
+    char errbuf[PCAP_ERRBUF_SIZE];
+    pcap_t *handle = pcap_open_live(INTERFACE, BUFSIZ, 1, 1000, errbuf);
+    if (!handle) {
+        fprintf(stderr, "Could not open device %s: %s\n", INTERFACE, errbuf);
+        return 1;
     }
 
+    struct bpf_program fp;
+    char filter_exp[] = "icmp";
+    if (pcap_compile(handle, &fp, filter_exp, 0, PCAP_NETMASK_UNKNOWN) == -1) {
+        fprintf(stderr, "Error compiling filter: %s\n", pcap_geterr(handle));
+        return 1;
+    }
+    if (pcap_setfilter(handle, &fp) == -1) {
+        fprintf(stderr, "Error setting filter: %s\n", pcap_geterr(handle));
+        return 1;
+    }
+
+    printf("Listening for ICMP ping requests on %s...\n", INTERFACE);
+    while (keep_running) {
+        pcap_dispatch(handle, 10, packet_handler, NULL);
+    }
+
+    pcap_close(handle);
     printf("Program exited successfully.\n");
     return 0;
 }

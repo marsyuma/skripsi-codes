@@ -4,12 +4,14 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <signal.h>
 #include <net-snmp/net-snmp-config.h>
 #include <net-snmp/net-snmp-includes.h>
 
 #define TRAP_DESTINATION "192.168.0.140"
 #define COMMUNITY "public"
 #define OID ".1.3.6.1.4.1.8072.9999.1" // Custom OID
+#define CHECK_INTERVAL 3 // Time in seconds to check connections
 
 // List of domains to check
 const char *domains[] = {
@@ -17,6 +19,15 @@ const char *domains[] = {
     "google.com",
     "yahoo.com"
 };
+
+volatile sig_atomic_t keep_running = 1; // Flag to control loop execution
+
+void handle_signal(int sig) {
+    if (sig == SIGINT) {  // Catch Ctrl+C
+        printf("\nTerminating program...\n");
+        keep_running = 0;
+    }
+}
 
 int check_connection(const char *hostname) {
     struct hostent *host;
@@ -68,16 +79,25 @@ void send_snmp_trap(const char *message) {
     if (snmp_send(ss, pdu) == 0) {
         snmp_perror("snmp_send");
     }
-    
+
     snmp_close(ss);
 }
 
 int main() {
-    for (int i = 0; i < sizeof(domains) / sizeof(domains[0]); i++) {
-        if (check_connection(domains[i])) {
-            printf("Connection detected to %s, sending SNMP trap...\n", domains[i]);
-            send_snmp_trap(domains[i]);
+    signal(SIGINT, handle_signal); // Handle Ctrl+C
+
+    while (keep_running) {
+        for (int i = 0; i < sizeof(domains) / sizeof(domains[0]); i++) {
+            if (check_connection(domains[i])) {
+                printf("Connection detected to %s, sending SNMP trap...\n", domains[i]);
+                send_snmp_trap(domains[i]);
+            } else {
+                printf("No connection to %s\n", domains[i]);
+            }
         }
+        sleep(CHECK_INTERVAL); // Wait before the next check
     }
+
+    printf("Program exited successfully.\n");
     return 0;
 }
